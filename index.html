@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Drone Gate Timer</title>
+  <style>
+    :root {
+      --bg: #121212;
+      --card: #1e1e1e;
+      --accent: #00e676;
+      --danger: #f44336;
+      --text: #ffffff;
+    }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      box-sizing: border-box;
+    }
+    .container {
+      max-width: 500px;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      transition: all 0.3s ease;
+    }
+    .card {
+      background: var(--card);
+      padding: 1.25rem;
+      border-radius: 12px;
+      margin-bottom: 1rem;
+      transition: opacity 0.3s ease;
+    }
+    button {
+      width: 100%;
+      font-size: 1.1rem;
+      padding: 0.85rem;
+      margin: 0.4rem 0;
+      border-radius: 8px;
+      border: none;
+      box-sizing: border-box;
+      cursor: pointer;
+      font-weight: bold;
+    }
+    .timer-display {
+      font-size: 2.8rem;
+      text-align: center;
+      font-family: monospace;
+      color: var(--accent);
+      font-weight: bold;
+    }
+    
+    /* Default Tap Button Styling */
+    .tap-btn {
+      height: 140px;
+      background: var(--accent);
+      color: #000;
+      font-size: 2rem;
+      font-weight: 900;
+      border-radius: 16px;
+      touch-action: manipulation;
+      user-select: none;
+      transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+      margin-bottom: 1rem;
+      border: 3px solid transparent;
+    }
+    .tap-btn:disabled {
+      background: #2a2a2a;
+      color: #555;
+      cursor: not-allowed;
+    }
+    .tap-btn:active:not(:disabled) {
+      transform: scale(0.97);
+      background: #00c853;
+    }
+
+    /* ACTIVE RUN UI MODE: Maximizes the Tap Button for No-Look Tapping */
+    body.running .tap-btn {
+      height: 60vh;
+      font-size: 3.5rem;
+      line-height: 1.2;
+      border-radius: 24px;
+      box-shadow: 0 0 35px rgba(0, 230, 118, 0.4);
+    }
+    body.running .log-card {
+      opacity: 0.2;
+      pointer-events: none;
+    }
+
+    .btn-group { display: flex; gap: 0.5rem; }
+    .btn-secondary { background: #333; color: #fff; font-size: 0.9rem; }
+    
+    .table-wrapper {
+      max-height: 300px;
+      overflow-y: auto;
+      margin-top: 1rem;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th, td { text-align: left; padding: 0.6rem 0.4rem; border-bottom: 1px solid #333; }
+    th { position: sticky; top: 0; background: var(--card); color: #aaa; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <!-- Stopwatch & Control Card -->
+  <div class="card">
+    <div class="timer-display" id="display">00:00.000</div>
+    <button id="startBtn" onclick="toggleRun()" style="background:#2196F3; color:white;">Start New Trial</button>
+  </div>
+
+  <!-- Big Blind-Tap Gate Button -->
+  <button class="tap-btn" id="tapBtn" onclick="recordGate()" disabled>
+    GATE PASSED<br><small style="font-size: 0.4em; font-weight: normal;">(Tap anywhere or press Space)</small>
+  </button>
+
+  <!-- Trial Logs & Export Card -->
+  <div class="card log-card">
+    <div class="btn-group">
+      <button onclick="exportCSV()" style="background:#ff9800; color:black;">Export All Trials (CSV)</button>
+      <button class="btn-secondary" onclick="clearData()">Clear History</button>
+    </div>
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th>Trial</th>
+            <th>Start Time</th>
+            <th>Gate</th>
+            <th>Split</th>
+            <th>Total</th>
+          </tr>
+        </thead>
+        <tbody id="logs"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+  let isRunning = false;
+  let startTime = 0;
+  let lastGateTime = 0;
+  let gateCount = 0;
+  let timerInterval = null;
+  
+  // Array holding all historical trials: [{ trialId, startTimeFormatted, gates: [{gate, split, total}] }]
+  let allTrials = [];
+  let currentTrial = null;
+
+  // Web Audio Context Synthesizer
+  let audioCtx = null;
+
+  function initAudio() {
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume();
+    }
+  }
+
+  function playTone(freq, duration, type = 'sine') {
+    try {
+      initAudio();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+      gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+      
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      
+      osc.start();
+      osc.stop(audioCtx.currentTime + duration);
+    } catch (e) {
+      console.warn("Audio context not allowed yet:", e);
+    }
+  }
+
+  // Load persistent history on page load
+  window.addEventListener("DOMContentLoaded", () => {
+    const saved = localStorage.getItem("drone_all_trials");
+    if (saved) {
+      try {
+        allTrials = JSON.parse(saved);
+        renderTable();
+      } catch (e) {
+        console.error("Failed to parse local storage logs", e);
+      }
+    }
+  });
+
+  function saveToLocalStorage() {
+    localStorage.setItem("drone_all_trials", JSON.stringify(allTrials));
+  }
+
+  function formatDateTime(date) {
+    const pad = (n) => n.toString().padStart(2, '0');
+    const yyyy = date.getFullYear();
+    const mm = pad(date.getMonth() + 1);
+    const dd = pad(date.getDate());
+    const hh = pad(date.getHours());
+    const min = pad(date.getMinutes());
+    const ss = pad(date.getSeconds());
+    return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
+  }
+
+  function toggleRun() {
+    initAudio();
+    const startBtn = document.getElementById("startBtn");
+    const tapBtn = document.getElementById("tapBtn");
+
+    if (!isRunning) {
+      // START NEW TRIAL
+      isRunning = true;
+      document.body.classList.add("running");
+      
+      gateCount = 0;
+      startTime = performance.now();
+      lastGateTime = startTime;
+      
+      const trialNum = allTrials.length + 1;
+      const nowFormatted = formatDateTime(new Date());
+
+      currentTrial = {
+        trialId: trialNum,
+        startTimeFormatted: nowFormatted,
+        gates: []
+      };
+
+      allTrials.push(currentTrial);
+      saveToLocalStorage();
+      renderTable();
+      
+      playTone(880, 0.15); // High start beep
+      startBtn.textContent = "Stop / Finish Trial";
+      startBtn.style.background = "var(--danger)";
+      tapBtn.disabled = false;
+
+      timerInterval = setInterval(updateDisplay, 10);
+    } else {
+      // STOP TRIAL
+      isRunning = false;
+      document.body.classList.remove("running");
+      clearInterval(timerInterval);
+      
+      playTone(440, 0.2); // Low finish beep
+      startBtn.textContent = "Start New Trial";
+      startBtn.style.background = "#2196F3";
+      tapBtn.disabled = true;
+    }
+  }
+
+  function updateDisplay() {
+    const elapsed = (performance.now() - startTime) / 1000;
+    const mins = Math.floor(elapsed / 60).toString().padStart(2, '0');
+    const secs = (elapsed % 60).toFixed(3).padStart(6, '0');
+    document.getElementById("display").textContent = `${mins}:${secs}`;
+  }
+
+  function recordGate() {
+    if (!isRunning || !currentTrial) return;
+
+    const now = performance.now();
+    gateCount++;
+    
+    // High triangle tone for audio feedback
+    playTone(1200, 0.08, 'triangle');
+
+    const splitTime = ((now - lastGateTime) / 1000).toFixed(3);
+    const totalTime = ((now - startTime) / 1000).toFixed(3);
+    lastGateTime = now;
+
+    currentTrial.gates.push({
+      gate: gateCount,
+      split: splitTime,
+      total: totalTime
+    });
+
+    saveToLocalStorage();
+    renderTable();
+  }
+
+  function renderTable() {
+    const tbody = document.getElementById("logs");
+    let html = "";
+
+    // Render trials in reverse chronological order (newest trial on top)
+    for (let i = allTrials.length - 1; i >= 0; i--) {
+      const trial = allTrials[i];
+      // Render gates inside trial from newest to oldest
+      for (let j = trial.gates.length - 1; j >= 0; j--) {
+        const g = trial.gates[j];
+        html += `<tr>
+          <td>#${trial.trialId}</td>
+          <td style="font-size:0.75rem; color:#aaa;">${trial.startTimeFormatted}</td>
+          <td>Gate ${g.gate}</td>
+          <td>${g.split}s</td>
+          <td>${g.total}s</td>
+        </tr>`;
+      }
+    }
+    tbody.innerHTML = html;
+  }
+
+  function clearData() {
+    if (confirm("Permanently clear all historical trials from storage?")) {
+      allTrials = [];
+      currentTrial = null;
+      localStorage.removeItem("drone_all_trials");
+      renderTable();
+      document.getElementById("display").textContent = "00:00.000";
+    }
+  }
+
+  // Keyboard Trigger (Spacebar acts as blind tap)
+  document.addEventListener("keydown", (e) => {
+    if (e.code === "Space" && isRunning) {
+      e.preventDefault();
+      recordGate();
+    }
+  });
+
+  function exportCSV() {
+    if (allTrials.length === 0) {
+      alert("No trial data to export yet.");
+      return;
+    }
+
+    let csvContent = "data:text/csv;charset=utf-8,Trial Number,Trial Start Time,Gate,Split Time (s),Total Elapsed (s)\n";
+
+    // Export trials chronologically (Trial 1 -> Trial N)
+    allTrials.forEach(trial => {
+      trial.gates.forEach(g => {
+        csvContent += `"${trial.trialId}","${trial.startTimeFormatted}","Gate ${g.gate}",${g.split},${g.total}\n`;
+      });
+    });
+
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    const filename = `Drone_Trials_Export_${Date.now()}.csv`;
+    link.setAttribute("download", filename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+</script>
+</body>
+</html>
